@@ -1,0 +1,110 @@
+//*********************************************************************************************//
+//****************************** CONSTRUCTION DE LA GEOMETRIE *********************************//
+//*********************************************************************************************//
+
+real R = 0.5 ;
+
+real xf = -3./2.*cos(pi/6.);
+real yf = 0.;
+cout << "xf = " << xf << endl;
+
+real xb = 0.;
+real yb = -3./4.;
+cout << "yb = " << yb << endl;
+
+
+real xt = 0.;
+real yt = 3./4.;
+
+//********************************************************************************************//
+//***************************************** PARAMETRES ***************************************//
+//********************************************************************************************//
+
+real xi = -6 ; 
+real xo = 20. ;
+real yi = -6.;
+real yo = 6.;
+real L = xo-xi;
+real H = yo-yi;
+
+// inner zone
+real alpha=0.2;
+real y1 = yi+alpha*H;
+real y3 = yi+(1.-alpha)*H;
+real xu = xi+0.08*L;
+
+// inner inner zone
+real y11 = yb-2*R;
+real y33 = yt+2*R;
+real xuu = xi+0.15*L;
+
+
+//********************************************************************************************//
+//*********************************** CREATION DU MAILLAGE ***********************************//
+//********************************************************************************************//
+
+border l(t=-yo,-yi){x=xi;y=-t;label=1;};
+border bottom(t=xi,xo){x=t;y=yi;label=2;};
+border top(t=-xo,-xi){x=-t;y=yo;label=2;};
+
+border ra(t=yi,y1){x=xo;y=t;label=3;};
+border rb(t=y1,y11){x=xo;y=t;label=3;};
+border rc(t=y11,y33){x=xo;y=t;label=3;};
+border rd(t=y33,y3){x=xo;y=t;label=3;};
+border re(t=y3,yo){x=xo;y=t;label=3;};
+
+border cylF(t=0,2*pi){x=xf+R*cos(t);y=yf+R*sin(t);label=4;};
+border cylB(t=0,2*pi){x=xb+R*cos(t);y=yb+R*sin(t);label=4;};
+border cylT(t=0,2*pi){x=xt+R*cos(t);y=yt+R*sin(t);label=4;};
+
+border extrabb(t=xu,xo){x=t;y=y1;label=5;};
+border extratt(t=-xo,-xu){x=-t;y=y3;label=5;};
+border extrau(t=-y3,-y1){x=xu;y=-t;label=5;};
+
+border extrabbb1(t=xuu,xt+4.*R){x=t;y=y11;label=5;};
+border extrattt1(t=-(xt+4.*R),-xuu){x=-t;y=y33;label=5;};
+border extrauu(t=-y33,-y11){x=xuu;y=-t;label=5;};
+
+border extrabbb11(t=xt+4.*R,xi+0.6*L){x=t;y=y11;label=5;};
+border extrattt11(t=-(xi+0.6*L),-(xt+4.*R)){x=-t;y=y33;label=5;};
+
+border extrabbb2(t=xi+0.6*L,xo){x=t;y=y11;label=5;};
+border extrattt2(t=-xo,-(xi+0.6*L)){x=-t;y=y33;label=5;};
+
+border trailcenter(t=xf+R,xf+4*R+xb-xf){x=t;y=0;label=5;};
+border trailtop(t=xt+R,xt+4*R){x=t;y=yt;label=5;};
+border trailbottom(t=xb+R,xb+4*R){x=t;y=yb;label=5;};
+
+border trailcenterr(t=xf+4*R+xb-xf,xi+0.5*L){x=t;y=0;label=5;};
+border trailtopp(t=xt+4*R,xi+0.5*L){x=t;y=yt;label=5;};
+border trailbottomm(t=xb+4*R,xi+0.5*L){x=t;y=yb;label=5;};
+
+real eta=1.35;
+mesh th=buildmesh( //l1(nl1) + l2(nl2) + l3(nl3) + l4(nl4)
+l(eta*13)+ bottom(eta*25)
++ ra(eta*5) + rb(eta*5) + rc(eta*15) + rd(eta*5) + re(eta*5)
++ top(eta*25)
++ cylF(-eta*170) + cylB(-eta*170) + cylT(-eta*170)
++ extrabb(eta*35)
++ extratt(eta*35)
++ extrau(eta*15)
++ extrabbb1(eta*50)
++ extrattt1(eta*50)
++ extrabbb11(eta*70)
++ extrattt11(eta*70)
++ extrauu(eta*30)
++ extrabbb2(eta*50)
++ extrattt2(eta*50)
++ trailcenter(eta*80)
++ trailtop(eta*60)
++ trailbottom(eta*60)
++ trailcenterr(eta*80)
++ trailtopp(eta*80)
++ trailbottomm(eta*80)
+);
+
+savemesh(th,"mesh_middle3.msh");
+
+//********************************************************************************************//
+//******************************************** FIN *******************************************//
+//********************************************************************************************//

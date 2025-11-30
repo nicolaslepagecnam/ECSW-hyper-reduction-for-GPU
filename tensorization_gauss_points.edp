@@ -1,0 +1,163 @@
+// ============================================================================
+//  FILE:        tensorization_gauss_points.edp
+//  AUTHOR:      Nicolas Lepage (CNAM / M2N Lab)
+//  DESCRIPTION: 
+//      Builds Gauss quadrature points and weights for the physical mesh, 
+//      performs reference→physical triangle mapping, constructs tensorised 
+//      PHI matrices for velocity/pressure and their derivatives, and exports 
+//      them for use in ECSW hyper-reduction and GPU computations.
+//
+//      This script is intended to be used together with:
+//          - pinball_fom_reference.edp
+//          - GPU/ECSW post-processing scripts (Python/NumPy/CUDA/JAX)
+//
+//  DATE:        2025
+// ============================================================================
+
+include "freefem_init_RE_30.edp"   // loads mesh + spaces + parameters
+
+// ============================================================================
+//  1. Gauss quadrature points and weights (reference triangle)
+//     Using the 7-point Dunavant rule
+// ============================================================================
+int ngauss = 7;
+real[int] xigauss = [
+    1./3.,
+    (6.-sqrt(15.))/21., (6.-sqrt(15.))/21., (9.+2.*sqrt(15.))/21.,
+    (6.+sqrt(15.))/21., (6.+sqrt(15.))/21., (9.-2.*sqrt(15.))/21.
+];
+
+real[int] etagauss = [
+    1./3.,
+    (6.-sqrt(15.))/21., (9.+2.*sqrt(15.))/21., (6.-sqrt(15.))/21.,
+    (6.+sqrt(15.))/21., (9.-2.*sqrt(15.))/21., (6.+sqrt(15.))/21.
+];
+
+real[int] omegag = [
+    .225,
+    (155.-sqrt(15.))/1200., (155.-sqrt(15.))/1200., (155.-sqrt(15.))/1200.,
+    (155.+sqrt(15.))/1200., (155.+sqrt(15.))/1200., (155.+sqrt(15.))/1200.
+];
+
+// ============================================================================
+//  2. Compute area of each triangular element
+// ============================================================================
+fespace Vh0(th, P0);
+
+varf etaK(u, v) = int2d(th)(v);
+Vh0 areaK;
+areaK[] = etaK(0, Vh0);
+
+int nelem = Vh0.nt;
+
+// ============================================================================
+//  3. Reference→Physical mapping for each Gauss point
+//     x = Σ_k ϕ_k(xi,eta) * x_node_k
+// ============================================================================
+real xhat, yhat;
+
+// Barycentric coordinate coefficients for reference triangle
+real[int] aa = [1., 0., 0.];
+real[int] bb = [-1., 1., 0.];
+real[int] cc = [-1., 0., 1.];
+
+/*  Map reference (xi, eta) → physical triangle
+    (Macro so it inlines in the Gauss loop)
+*/
+macro ref2phys(xi, eta, ielem) {
+    xhat = 0.;
+    yhat = 0.;
+    for (int k = 0; k < 3; k++) {
+        xhat += ( aa(k) + bb(k)*xi + cc(k)*eta ) * th[ielem][k].x;
+        yhat += ( aa(k) + bb(k)*xi + cc(k)*eta ) * th[ielem][k].y;
+    }
+} // end macro
+
+// ============================================================================
+//  4. Build global Gauss point cloud over all elements
+// ============================================================================
+int ngausstot = nelem * ngauss;
+
+real[int] xtot(ngausstot), ytot(ngausstot), omegatot(ngausstot);
+
+int itot = 0;
+
+for (int ielem = 0; ielem < nelem; ielem++) {
+    for (int igauss = 0; igauss < ngauss; igauss++) {
+
+        // Reference→physical mapping
+        ref2phys( xigauss(igauss), etagauss(igauss), ielem );
+
+        xtot[itot] = xhat;
+        ytot[itot] = yhat;
+
+        // Physical Gauss weight = reference weight * element area
+        omegatot[itot] = omegag(igauss) * areaK[][ielem];
+
+        itot++;
+    }
+}
+
+// ============================================================================
+//  5. Build tensorised PHI matrices at Gauss points
+//     These matrices map ROM coefficients → physical evaluations at Gauss pts
+// ============================================================================
+matrix PHIu    = interpolate(Uvvp, xtot, ytot, op = 0, t = true, composante = 0);
+matrix PHIv    = interpolate(Uvvp, xtot, ytot, op = 0, t = true, composante = 1);
+matrix PHIp    = interpolate(Uvvp, xtot, ytot, op = 0, t = true, composante = 2);
+
+matrix dPHIudx = interpolate(Uvvp, xtot, ytot, op = 1, t = true, composante = 0);
+matrix dPHIudy = interpolate(Uvvp, xtot, ytot, op = 2, t = true, composante = 0);
+matrix dPHIvdx = interpolate(Uvvp, xtot, ytot, op = 1, t = true, composante = 1);
+matrix dPHIvdy = interpolate(Uvvp, xtot, ytot, op = 2, t = true, composante = 1);
+
+cout << "PHIu Size: [" << PHIu.n << ", " << PHIu.m << "]" << endl;
+
+// Diagonal Gauss weight matrix
+matrix Wgauss;
+Wgauss.resize(ngausstot, ngausstot);
+Wgauss.diag = omegatot;
+
+// ============================================================================
+//  6. Function: build W~ (Wtilde) for ECSW quadrature
+// ============================================================================
+func matrix WTILDE(real[int] &w, matrix &Wgauss) {
+    matrix Wtilde = Wgauss;
+
+    matrix T;
+    T.resize(Wgauss.n, Wgauss.n);
+    T.diag = w;
+
+    Wtilde = Wgauss * T;
+    return Wtilde;
+}
+
+// ============================================================================
+//  7. Export matrices to text files
+//     (These will be read by Python for GPU/NumPy operations)
+// ============================================================================
+{
+    ofstream file("PHIu.txt"); file.precision(16); file << PHIu << endl;
+}
+{
+    ofstream file("PHIv.txt"); file.precision(16); file << PHIv << endl;
+}
+{
+    ofstream file("dPHIudx.txt"); file.precision(16); file << dPHIudx << endl;
+}
+{
+    ofstream file("dPHIudy.txt"); file.precision(16); file << dPHIudy << endl;
+}
+{
+    ofstream file("dPHIvdx.txt"); file.precision(16); file << dPHIvdx << endl;
+}
+{
+    ofstream file("dPHIvdy.txt"); file.precision(16); file << dPHIvdy << endl;
+}
+{
+    ofstream file("Wgauss.txt"); file.precision(16); file << omegatot << endl;
+}
+
+// ============================================================================
+//  END OF FILE
+// ============================================================================

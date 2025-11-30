@@ -1,0 +1,153 @@
+// ============================================================================
+//  FILE:        compute_baseflow_newton.edp
+//  AUTHOR:      Nicolas Lepage (CNAM / M2N Lab)
+//  DESCRIPTION:
+//      Computes steady Navier–Stokes baseflows for the fluidic pinball at 
+//      various Reynolds numbers using a Newton–Raphson fixed-point iteration.
+//
+//      For each Re in the list, the script:
+//          1. Builds the Newton Jacobian (linearised NS operator)
+//          2. Builds the steady NS residual
+//          3. Solves for delta u = J^{-1} r
+//          4. Updates the velocity field
+//          5. Exports the converged baseflow to file
+//          6. Stores convergence history to newton_vel.txt
+//
+//  DATE:        2025
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// 1. Mesh + Finite Element Spaces
+// ---------------------------------------------------------------------------
+mesh th = readmesh("mesh_middle3.msh");
+
+fespace Uv(th, P1b);               // Velocity components (bubble)
+fespace Up(th, P1);                // Pressure 
+fespace Uvvp(th, [P1b, P1b, P1]);  // Mixed (u, v, p)
+
+// ---------------------------------------------------------------------------
+// 2. List of Reynolds numbers for which we compute baseflows
+// ---------------------------------------------------------------------------
+real[int] Reynolds(3);
+Reynolds = [10, 20, 30];
+
+// Output file: convergence history
+string outfile = "newton_vel.txt";
+
+{
+    ofstream f(outfile);    // reset file
+}
+
+// Baseflow container
+Uvvp [ub1, ub2, pb];
+ub1[] = 0;                  // initial guess
+
+// ============================================================================
+// 3. Loop over Reynolds numbers
+// ============================================================================
+for (int ii = 0; ii < Reynolds.n; ii++)
+{
+    cout << "============================================" << endl;
+    cout << "      Computing Baseflow for Re = " << Reynolds(ii) << endl;
+    cout << "============================================" << endl;
+
+    real nu = 1.0 / 10.0;   // viscosity
+    real resl2;
+    real normdu = 1.0;
+
+    // Velocity scaling at inlet
+    real velscale = Reynolds(ii) / 10.0;
+
+    // ========================================================================
+    // 4. Newton loop
+    // ========================================================================
+    while (normdu > 5e-15)
+    {
+        // ------------------------------------------------------------------
+        // 4.1 Jacobian (Newton linear operator)
+        // ------------------------------------------------------------------
+        matrix NSMAT;
+        {
+            varf NS([du1, du2, dp], [v1, v2, q])
+                = int2d(th)(
+                    // Viscous terms
+                    nu*(dx(du1)*dx(v1) + dy(du1)*dy(v1)
+                      + dx(du2)*dx(v2) + dy(du2)*dy(v2))
+
+                    // Linearised convection
+                    + v1*(du1*dx(ub1) + du2*dy(ub1) + ub1*dx(du1) + ub2*dy(du1))
+                    + v2*(du1*dx(ub2) + du2*dy(ub2) + ub1*dx(du2) + ub2*dy(du2))
+
+                    // Pressure gradient + continuity constraint
+                    - dp*(dx(v1) + dy(v2))
+                    + q*(dx(du1) + dy(du2))
+                )
+                // Boundary conditions
+                + on(1, du1 = (1.0*velscale) - ub1, du2 = -ub2) // inflow
+                + on(4, du1 = -ub1, du2 = -ub2)                  // cylinder no-slip
+                + on(2, du2 = -ub2);                             // symmetry/slip
+
+            NSMAT = NS(Uvvp, Uvvp, solver = sparsesolver);
+        }
+
+        // ------------------------------------------------------------------
+        // 4.2 Compute residual of steady NS equations
+        // ------------------------------------------------------------------
+        Uvvp [r1, r2, r3];
+        {
+            varf SMNS([du1, du2, dp], [v1, v2, q])
+                = int2d(th)(
+                    - nu*(dx(ub1)*dx(v1) + dy(ub1)*dy(v1)
+                          + dx(ub2)*dx(v2) + dy(ub2)*dy(v2))
+
+                    - v1*(ub1*dx(ub1) + ub2*dy(ub1))
+                    - v2*(ub1*dx(ub2) + ub2*dy(ub2))
+
+                    + pb*(dx(v1) + dy(v2))
+                    - q*(dx(ub1) + dy(ub2))
+                )
+                + on(1, du1 = (1.0*velscale) - ub1, du2 = -ub2)
+                + on(4, du1 = -ub1, du2 = -ub2)
+                + on(2, du2 = -ub2);
+
+            r1[] = SMNS(0, Uvvp);
+
+            resl2 = r1[].l2; 
+            cout << "Residual L2 = " << resl2 << endl;
+        }
+
+        // ------------------------------------------------------------------
+        // 4.3 Solve linear Newton step  (delta u = J^{-1} r)
+        // ------------------------------------------------------------------
+        {
+            Uvvp [du1, du2, dp];
+            du1[] = NSMAT^-1 * r1[];
+            normdu = sqrt( int2d(th)(du1^2 + du2^2) / th.area );
+
+            cout << "Newton increment norm = " << normdu << endl;
+
+            // Update base flow
+            ub1[] += du1[];
+        }
+
+        // ------------------------------------------------------------------
+        // 4.4 Save Newton iteration to file
+        // ------------------------------------------------------------------
+        {
+            ofstream file(outfile, append);
+            file << Reynolds(ii) << " " << resl2 << " " << normdu << endl;
+        }
+
+    } // end Newton loop
+
+    // ========================================================================
+    // 5. Export converged baseflow
+    // ========================================================================
+    {
+        string fname = "baseflow_" + Reynolds(ii) + ".txt";
+        ofstream file(fname);
+        file.precision(16);
+        file << ub1[];
+    }
+
+} // end Reynolds loop

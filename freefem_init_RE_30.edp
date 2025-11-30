@@ -1,0 +1,117 @@
+// ============================================================================
+//  FILE:        freefem_init_RE_30.edp
+//  AUTHOR:      Nicolas Lepage (CNAM / M2N Lab)
+//  DESCRIPTION: Full-order Navier–Stokes solver for the fluidic pinball setup.
+//               Builds linearised operator, non-linear terms, and loads baseflow.
+//               Used for ECSW hyper-reduction study (GPU implementation).
+//  DATE:        2025
+// ============================================================================
+
+load "MUMPS_seq"
+
+// ---------------------------------------------------------------------------
+// 1. Mesh and finite elements
+// ---------------------------------------------------------------------------
+mesh th = readmesh("mesh_middle3.msh");
+
+fespace Uv(th, P1b);
+fespace Up(th, P1);
+fespace Uvvp(th, [P1b, P1b, P1]);   // (u, v, p)
+
+// ---------------------------------------------------------------------------
+// 3. Physical parameters
+// ---------------------------------------------------------------------------
+real dt = 0.0075;
+real Re = 30;         
+real nu = 1./10.0;    // viscosity
+
+// ---------------------------------------------------------------------------
+// 4. Declare fields
+// ---------------------------------------------------------------------------
+
+// Base flow
+Uvvp [ub1, ub2, pb];
+
+// Total flow (base + pert)
+Uvvp [utot1, utot2, ptot];
+
+// Current, previous, and previous-previous flowfields
+Uvvp [u, v, p];
+Uvvp [up, vp, pp];
+Uvvp [upp, vpp, ppp];
+
+// Non-linear terms (tensor and untensorised)
+Uvvp [rhs1, rhs2, rhs3];
+Uvvp [nlpu, nlpv, nlpp];
+Uvvp [nlppu, nlppv, nlppp];
+Uvvp [nlpubis, nlpvbis, nlppbis];
+
+// Misc auxiliaries
+Uvvp [sm1, sm2, sm3];
+Uvvp [aux1, aux2, aux3];
+
+// ---------------------------------------------------------------------------
+// 5. Mass matrix
+// ---------------------------------------------------------------------------
+varf Mass([u1, v1, p1], [u2, v2, p2])
+    = int2d(th)(u1*u2 + v1*v2);
+
+matrix MatMass = Mass(Uvvp, Uvvp, solver = sparsesolver);
+
+// ---------------------------------------------------------------------------
+// 7. Load base flow from file
+// ---------------------------------------------------------------------------
+// Base Flow 
+{
+  ifstream file("baseflow_30.txt");	// load base-flow
+  file >> ub1[];
+}
+
+// ---------------------------------------------------------------------------
+// 8. Linearised Navier–Stokes operator
+// ---------------------------------------------------------------------------
+
+real a0,a1,a2,bet0,bet1;
+a0=1./dt; a1=-1./dt; a2=0; bet0=1; bet1=0;	// coefficients for first-order in time integration
+
+real da0,da1,da2,dbet0,dbet1;
+da0=1./dt; da1=-1./dt; da2=0; dbet0=1; dbet1=0;	// coefficients for first-order in time integration
+
+varf LNS([u1,v1,p1],[u2,v2,p2])
+= int2d(th)(
+	(a0*u1*u2 + a0*v1*v2) 
+	+ nu*(dx(u1)*dx(u2)+dy(u1)*dy(u2))
+	+ nu*(dx(v1)*dx(v2)+dy(v1)*dy(v2))
+	+ u2*(u1*dx(ub1)+v1*dy(ub1)+ub1*dx(u1)+ub2*dy(u1))
+	+ v2*(u1*dx(ub2)+v1*dy(ub2)+ub1*dx(v1)+ub2*dy(v1))
+	- p1*(dx(u2)+dy(v2))
+	- p2*(dx(u1)+dy(v1)))
++ on(1,4,u1=0,v1=0)
++ on(2,v1=0);
+matrix A=LNS(Uvvp,Uvvp,solver=sparsesolver);
+
+// ---------------------------------------------------------------------------
+// 9. Non-linear term
+// ---------------------------------------------------------------------------
+varf rhs([u1,v1,p1],[u2,v2,p2])
+= int2d(th)(
+	-u2*(u*dx(u)+v*dy(u))
+	-v2*(u*dx(v)+v*dy(v)))
++ on(1,4,u1=0,v1=0)
++ on(2,v1=0);	
+
+// ---------------------------------------------------------------------------
+// 10. Derivative matrices (optional, for speed)
+// ---------------------------------------------------------------------------
+varf derx([a,b,c],[v1,v2,q])
+= int2d(th)(-v1*dx(a)-v2*dx(b));
+
+varf dery([a,b,c],[v1,v2,q])
+= int2d(th)(-v1*dy(a)-v2*dy(b));
+
+matrix MatDerx=derx(Uvvp,Uvvp);
+matrix MatDery=dery(Uvvp,Uvvp);
+
+// ============================================================================
+//  END OF FILE
+// ============================================================================

@@ -1,0 +1,197 @@
+// ============================================================================
+//  FILE:        Export_operators_freefem.edp
+//  AUTHOR:      Nicolas Lepage (CNAM / M2N Lab)
+//  DESCRIPTION:
+//      Builds and exports the linearised Navier–Stokes operators and force
+//      vectors for the fluidic pinball at Re = 30.
+//
+//      More precisely, this script:
+//        * loads the baseflow (ub1, ub2, pb) from "baseflow_30.txt"
+//        * assembles the linearised NS operator A
+//        * assembles a "shifted" operator As (used for eigenvalue solvers)
+//        * builds drag and lift vectors via boundary integrals on the cylinder
+//        * writes A, As, DragVec, LiftVec into text files.
+//
+//      These files are then post-processed in Python (e.g., POD, ECSW, GPU).
+//
+//  DATE:        2025
+// ============================================================================
+
+include "freefem_init_RE_30.edp"   // mesh th, spaces Uv, Up, Uvvp, nu, etc.
+
+// ============================================================================
+// 1. Local baseflow variables + loading of the baseflow
+// ============================================================================
+{
+    Uvvp [ub1, ub2, pb];    // Local baseflow containers (velocity, pressure)
+
+    // ------------------------------------------------------------------------
+    // Load baseflow from file (must exist beforehand, e.g., computed by
+    // compute_baseflow_newton.edp).
+    // ------------------------------------------------------------------------
+    {
+        ifstream file("baseflow_30.txt");
+        file >> ub1[];   // Assuming file only stores u-component; adapt if needed
+        // If ub2 and pb are stored, you can similarly read them:
+        // file >> ub2[] >> pb[];
+    }
+
+    // ========================================================================
+    // 2. Linearised Navier–Stokes operator A (around baseflow)
+    // ========================================================================
+    varf NS([du1, du2, dp], [v1, v2, q])
+        = int2d(th)(
+              // Viscous terms
+              - nu*(dx(du1)*dx(v1) + dy(du1)*dy(v1)
+                  + dx(du2)*dx(v2) + dy(du2)*dy(v2))
+
+              // Linearised convection terms around (ub1, ub2)
+              - v1*(du1*dx(ub1) + du2*dy(ub1) + ub1*dx(du1) + ub2*dy(du1))
+              - v2*(du1*dx(ub2) + du2*dy(ub2) + ub1*dx(du2) + ub2*dy(du2))
+
+              // Pressure / continuity
+              + dp*(dx(v1) + dy(v2))
+              + q *(dx(du1) + dy(du2))
+          );
+
+    cout << "Assembling linearised operator A" << endl;
+    matrix A = NS(Uvvp, Uvvp, solver = GMRES);
+
+    {
+        ofstream file("A_30.txt");
+        file.precision(16);
+        file << A << endl;
+    }
+
+    // ========================================================================
+    // 3. Shifted operator As (used e.g. in shift-invert eigenvalue problems)
+    // ========================================================================
+    varf aShifted([du1, du2, dp], [v1, v2, q])
+        = int2d(th)(
+              // Linearised convection (same as above)
+              - ( (ub1*dx(du1) + du1*dx(ub1)
+                  + ub2*dy(du1) + du2*dy(ub1)) * v1 )
+              - ( (ub1*dx(du2) + du1*dx(ub2)
+                  + ub2*dy(du2) + du2*dy(ub2)) * v2 )
+
+              // Viscous terms
+              - nu*(dx(du1)*dx(v1) + dy(du1)*dy(v1)
+                  + dx(du2)*dx(v2) + dy(du2)*dy(v2))
+
+              // Pressure / continuity
+              + dp*(dx(v1) + dy(v2))
+              + q *(dx(du1) + dy(du2))
+          )
+          // Homogeneous BCs on perturbation
+          + on(1, 2, 4, du1 = 0., du2 = 0.);
+
+    cout << "Assembling shifted operator As" << endl;
+    matrix As = aShifted(Uvvp, Uvvp, solver = GMRES);
+
+    {
+        ofstream file("As_30.txt");
+        file.precision(16);
+        file << As << endl;
+    }
+
+} // end local block (ub1,ub2,pb, A, As live only inside)
+
+{
+	//
+	// derivative and mass matrices
+	//
+
+	varf derx([a,b,c],[v1,v2,q])
+	= int2d(th)(v1*dx(a)+v2*dx(b));
+	matrix MatDerx=derx(Uvvp,Uvvp,solver=GMRES);
+
+	varf dery([a,b,c],[v1,v2,q])
+	= int2d(th)(v1*dy(a)+v2*dy(b));
+	matrix MatDery=dery(Uvvp,Uvvp,solver=GMRES);
+
+    // ========================================================================
+    // 4. Mass matrix M for the velocity space
+    // ========================================================================
+
+	varf mass([u1,u2,p],[v1,v2,q])	// mass matrix
+	= int2d(th)(u1*v1+u2*v2);
+	matrix MassMat=mass(Uvvp,Uvvp,solver=GMRES);
+
+	{
+		ofstream file("M.txt");
+		file.precision(16);
+		file << MassMat << endl;
+	}
+
+	{
+		ofstream file("DerX.txt");
+		file.precision(16);
+		file << MatDerx << endl;
+	}
+
+	{
+		ofstream file("DerY.txt");
+		file.precision(16);
+		file << MatDery << endl;
+	}
+}
+
+// ============================================================================
+// 4. Drag and lift “vectors” (force test function functionals)
+// ============================================================================
+//
+// These correspond to the linear functional F(u,p) = Cd or Cl when applied to
+// a perturbation (v1,v2,q). They are evaluated on the cylinder boundary (label 4).
+// ---------------------------------------------------------------------------
+
+varf DragVector([], [v1, v2, q])
+    = int1d(th, 4)(
+        -2.0 * (
+            (2.0*nu*dx(v1) - q) * N.x
+          + nu*(dx(v2) + dy(v1)) * N.y
+        )
+      );
+
+varf LiftVector([], [v1, v2, q])
+    = int1d(th, 4)(
+        -2.0 * (
+            nu*(dx(v2) + dy(v1)) * N.x
+          + (2.0*nu*dy(v2) - q) * N.y
+        )
+      );
+
+// Assemble into vectors in the full FE space
+real[int] DragVec = DragVector(0, Uvvp);
+real[int] LiftVec = LiftVector(0, Uvvp);
+
+// ---------------------------------------------------------------------------
+// 5. Export drag and lift vectors
+// ---------------------------------------------------------------------------
+{
+    ofstream file("DragVec_30.txt");
+    file.precision(16);
+    file << DragVec << endl;
+}
+
+{
+    ofstream file("LiftVec_30.txt");
+    file.precision(16);
+    file << LiftVec << endl;
+}
+
+{
+	//
+	// Structure of (u,v,p) vector : u=1, v=2, p=3
+	//
+	
+	Uvvp [u1,u2,p];
+	[u1,u2,p]=[1,2,3];
+	{
+		ofstream file("StructVect.txt");
+		file << u1[] << endl;
+	}
+}
+
+// ============================================================================
+//  END OF FILE
+// ============================================================================

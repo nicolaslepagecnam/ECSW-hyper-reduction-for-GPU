@@ -1,0 +1,196 @@
+// ============================================================================
+//  FILE:        dns_transient_RE_30.edp
+//  AUTHOR:      Nicolas Lepage (CNAM / M2N Lab)
+//  DESCRIPTION:
+//      Time integration of a perturbation around the baseflow for the fluidic
+//      pinball at Re = 30, starting from a given eigenmode.
+//
+//      - Uses operators and parameters defined in freefem_init_RE_30.edp:
+//            * mesh th, spaces Uv, Up, Uvvp
+//            * variables u, v, p, ub1, ub2, etc.
+//            * dt, nu, MatMass, LNS, rhs, A, etc.
+//      - Initial condition: small-amplitude eigenmode "ev1_30.txt".
+//      - Time stepping: 1st-order for first 2 steps, then 2nd-order in time
+//        (BDF2-like coefficients a0,a1,a2, bet0,bet1).
+//      - Outputs:
+//            * out_30.txt: time, Cd, Cl
+//            * sol_30/sol_<i>.txt: snapshots of perturbation field u[]
+//            * I0.txt: last time-step index (for restart)
+//
+//  DATE:        2025
+// ============================================================================
+
+include "freefem_init_RE_30.edp"
+
+// ============================================================================
+// 1. Input parameters
+// ============================================================================
+
+// quick = 0: use "accurate" nonlinear RHS (full varf rhs)
+// quick = 1: use "quick & dirty" factorised form (MatDerx/MatDery)
+int quick = 0;
+
+// Initial iteration index (for restart)
+int istart = 0;
+
+// Total number of iterations
+int nbre = 20000;
+
+// Save every 'saveperiod' time steps (for snapshots)
+int saveperiod = 20;
+
+// ---------------------------------------------------------------------------
+// CFL check based on baseflow velocity
+// ---------------------------------------------------------------------------
+{
+    Uv cfl = sqrt(ub1^2 + ub2^2) * dt / hTriangle;
+    cout << "CFL max = " << cfl[].max << endl;
+}
+
+// ============================================================================
+// 2. Allocate auxiliary fields
+// ============================================================================
+
+Uvvp [ulimc1, ulimc2, plimc];       // eigenmode container
+
+// ---------------------------------------------------------------------------
+// 3. Initialise perturbation from eigenmode (Re = 30)
+// ---------------------------------------------------------------------------
+{
+    ifstream file("ev8_30.txt");
+    file >> ulimc1[];
+}
+
+// Initial perturbation: small amplitude eigenmode
+u[] = 1e-1 * ulimc1[];   // (perturbation only in u-component)
+
+// ============================================================================
+// 4. Output file initialisation
+// ============================================================================
+
+string filename = "out_30.txt";
+{
+    ofstream file(filename);
+    file.precision(16);
+}
+
+// ============================================================================
+// 5. Time loop
+// ============================================================================
+
+real tps = istart * dt;    // current physical time
+
+for (int i = istart + 1; i <= istart + nbre; i++)
+{
+    cout.precision(8);
+    cout << "dt = " << dt << ", tps = " << tps << endl;
+
+    // ---------------------------------------------------------------
+    // 5.1 Flow fields at previous time steps
+    // ---------------------------------------------------------------
+    upp[] = up[];
+    up[]  = MatMass * u[];      // store mass-weighted solution
+
+    // ---------------------------------------------------------------
+    // 5.2 Nonlinear convective term (previous time step)
+    // ---------------------------------------------------------------
+    nlppu[] = nlpu[];
+
+    if (quick == 0)
+    {
+        // Full nonlinear RHS assembly: rhs is a varf defined in init file
+        nlpu[] = rhs(0, Uvvp);
+    }
+    else
+    {
+        // Quick & dirty variant using precomputed derivative matrices
+        aux1[] = MatDerx * u[];
+        [sm1, sm2, sm3] = [u, u, 0];
+        nlpu[] = sm1[].*aux1[];
+
+        aux1[] = MatDery * u[];
+        [sm1, sm2, sm3] = [v, v, 0];
+        nlpu[] += sm1[].*aux1[];
+    }
+
+    // ---------------------------------------------------------------
+    // 5.3 Switch to second-order time-integration after 2 steps
+    // ---------------------------------------------------------------
+    if (i == istart + 2)
+    {
+        a0   = 1.5/dt;
+        a1   = -2.0/dt;
+        a2   = 0.5/dt;
+        bet0 = 2.0;
+        bet1 = -1.0;
+
+        A = LNS(Uvvp, Uvvp, solver = sparsesolver);
+    }
+
+    // ---------------------------------------------------------------
+    // 5.4 Build right-hand side (BDF2-like in time)
+    // ---------------------------------------------------------------
+    rhs1[]  = -a1 * up[] - a2 * upp[];
+    rhs1[] +=  bet0 * nlpu[] + bet1 * nlppu[];
+
+    // ---------------------------------------------------------------
+    // 5.5 Solve linear system for new perturbation
+    //       (A u^{n+1} = RHS)
+// ---------------------------------------------------------------
+    u[] = A^-1 * rhs1[];
+
+    // ---------------------------------------------------------------
+    // 5.6 Update time
+    // ---------------------------------------------------------------
+    tps += dt;
+
+    // ====================================================================
+    // 6. Outputs: lift & drag coefficients, snapshots
+    // ====================================================================
+
+    // 6.1 Compute instantaneous total field and drag/lift coefficients
+    real Cd, Cl;
+
+    utot1[] = u[] + ub1[];    // total velocity = baseflow + perturbation
+    // utot2 and ptot assumed defined in init, if needed
+
+    Cd = -2.0 * int1d(th, 4)(
+                (2*nu*dx(utot1) - ptot)*N.x
+              + nu*(dx(utot2) + dy(utot1))*N.y );
+
+    Cl = -2.0 * int1d(th, 4)(
+                nu*(dx(utot2) + dy(utot1))*N.x
+              + (2*nu*dy(utot2) - ptot)*N.y );
+
+    // 6.2 Save time series every 20 steps and at final step
+    if ((i % 20) == 0 || i == istart + nbre)
+    {
+        ofstream f(filename, append);
+        f.precision(16);
+        f  << tps << "   "   // 1: time
+           << Cd  << "   "   // 2: drag coefficient
+           << Cl  << endl;   // 3: lift coefficient
+    }
+
+    // 6.3 Save restart / snapshot every saveperiod and at final step
+    if ((i % saveperiod) == 0 || i == istart + nbre)
+    {
+        // Ensure directory "sol_30" exists in the working directory
+		// Create output directory if it does not exist
+		exec("mkdir -p sol_30");
+
+        string namef = "sol_30/sol_" + (i) + ".txt";
+
+        ofstream g(namef);
+        g.precision(16);
+        g << u[] << endl;
+
+        ofstream fp("I0.txt");
+        fp << i << endl;
+    }
+
+} // end time loop
+
+// ============================================================================
+//  END OF FILE
+// ============================================================================

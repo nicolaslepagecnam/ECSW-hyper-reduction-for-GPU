@@ -1,0 +1,142 @@
+// ============================================================================
+//  FILE:        compute_eigenmodes_shiftinvert_Re30.edp
+//  AUTHOR:      Nicolas Lepage (CNAM / M2N Lab)
+//  DESCRIPTION:
+//      Computes linearised Navier–Stokes eigenmodes around the baseflow at
+//      Re = 30 for the fluidic pinball configuration, using a shift-invert
+//      strategy with complex shift sigma.
+//
+//      Steps:
+//        1. Load mesh, FE spaces, and baseflow (ub1, ub2, pb).
+//        2. Build mass matrix B.
+//        3. Build shifted operator As corresponding to (A - sigma M).
+//        4. Solve generalised eigenvalue problem As x = λ B x using FreeFem's
+//           EigenValue (shift-invert around sigma).
+//        5. Save unstable eigenvalues (Re(λ) ≥ 0) and corresponding eigenvectors.
+//
+//  DATE:        2025
+// ============================================================================
+
+include "freefem_init_RE_30.edp"   // defines: th, Uvvp, ub1, ub2, pb, etc.
+
+verbosity = 2;
+
+// ---------------------------------------------------------------------------
+// 1. Shift parameter (complex) for shift-invert eigenvalue solve
+//    sigma = σ_r + i σ_i
+// ---------------------------------------------------------------------------
+complex sigma = 0.05 + 1i*0.5;
+
+// ---------------------------------------------------------------------------
+// 2. Molecular kinematic viscosity and baseflow
+// ---------------------------------------------------------------------------
+nu = 1./10.0;
+
+// Load baseflow (steady solution for Re = 30)
+// Make sure this matches the file exported by the Newton solver
+{
+    ifstream file("baseflow_30.txt");   // or "cbD_mesh_middle3_30.txt" depending on your pipeline
+    file >> ub1[];                      // ub1 contains the baseflow velocity (u-component)
+    // ub2 and pb could also be read if stored, adjust accordingly
+}
+
+// ---------------------------------------------------------------------------
+// 3. Build mass matrix B (velocity space only)
+// ---------------------------------------------------------------------------
+cout << "Building mass matrix B" << endl;
+
+varf b([u1, u2, p], [v1, v2, q])
+    = int2d(th)( u1*v1 + u2*v2 );
+
+matrix<complex> B = b(Uvvp, Uvvp, solver = CG);
+
+// ---------------------------------------------------------------------------
+// 4. Storage for eigenvalues and eigenvectors
+// ---------------------------------------------------------------------------
+int nev = 100;                              // requested number of eigenpairs
+complex[int] ev(nev);                      // eigenvalues
+Uvvp<complex>[int] [eVu, eVv, eVp](nev);   // eigenvectors (complex-valued)
+int k;                                     // number of converged eigenpairs
+
+// ---------------------------------------------------------------------------
+// 5. Define shifted linear operator and solve eigenvalue problem
+// ---------------------------------------------------------------------------
+{
+    // Linearised operator with shift (A - sigma M), assembled in complex
+    varf aShifted([du1, du2, dp], [v1, v2, q])
+        = int2d(th)(
+            // Linearised convection around baseflow (ub1, ub2)
+            - ( (ub1*dx(du1) + du1*dx(ub1)
+                + ub2*dy(du1) + du2*dy(ub1)) * v1 )
+            - ( (ub1*dx(du2) + du1*dx(ub2)
+                + ub2*dy(du2) + du2*dy(ub2)) * v2 )
+
+            // Viscous terms
+            - nu*( dx(du1)*dx(v1) + dy(du1)*dy(v1)
+                 + dx(du2)*dx(v2) + dy(du2)*dy(v2) )
+
+            // Pressure / incompressibility
+            + dp*(dx(v1) + dy(v2))
+            + q *(dx(du1) + dy(du2))
+          )
+          // Homogeneous boundary conditions for perturbations
+          + on(1, 4, du1 = 0., du2 = 0.)
+          + on(2, du2 = 0.);
+
+    cout << "Building shifted operator As" << endl;
+    matrix<complex> As = aShifted(Uvvp, Uvvp, solver = GMRES);
+
+    cout << "Factorising As (LU decomposition)" << endl;
+    set(As, solver = sparsesolver);
+
+    cout << "Solving eigenvalue problem (shift = "
+         << real(sigma) << " + i " << imag(sigma) << ")" << endl;
+
+    // Generalised eigenproblem As x = λ B x with shift sigma
+    k = EigenValue(As, B, sigma = sigma, value = ev, vector = eVu);
+
+    // Safety: in some cases more eigenvalues than requested may converge
+    k = min(k, nev);
+
+    cout << "Number of converged eigenvalues: " << k << endl;
+}
+
+// ---------------------------------------------------------------------------
+// 6. Print all converged eigenvalues to stdout
+// ---------------------------------------------------------------------------
+for (int kk = 0; kk < k; kk++)
+{
+    cout << "Eigenvalue " << kk
+         << ": Re = " << real(ev[kk])
+         << ", Im = " << imag(ev[kk]) << endl;
+}
+
+// ---------------------------------------------------------------------------
+// 7. Save unstable eigenvalues (Re(λ) ≥ 0) and corresponding eigenvectors
+// ---------------------------------------------------------------------------
+
+// File to store eigenvalue list
+ofstream file("vp_30.txt");
+file.precision(16);
+
+// Loop on converged eigenvalues
+for (int kk = 0; kk < k; kk++)
+{
+    if (real(ev[kk]) >= 0.0)  // keep only (marginally) unstable modes
+    {
+        // Save eigenvalue: Re(λ), Im(λ), index
+        file << real(ev[kk]) << " " << imag(ev[kk]) << " " << kk << endl;
+
+        // Save corresponding eigenvector (real part) to a dedicated file
+        {
+            string fname = "ev" + kk + "_30.txt";
+            ofstream fifi(fname);
+            fifi.precision(16);
+            fifi << eVu[kk][].re << endl;
+        }
+    }
+}
+
+// ============================================================================
+//  END OF FILE
+// ============================================================================
